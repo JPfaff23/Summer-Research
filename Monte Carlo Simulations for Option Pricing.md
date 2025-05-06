@@ -75,12 +75,15 @@ Training inputs follow **Table 3** of Ferguson & Green (2018), for a six-asset b
 ## 4 Upgrade Ideas
 
 * **Quasi-MC (Sobol / Halton)** → error $O\bigl(N^{-1}\log^d N\bigr)$ vs.\ $O(N^{-1/2})$.  
-* **Control variates** → reuse analytic prices (e.g., Black–Scholes) or low-variance replicating portfolios; F&G’s deep-learning control-variate is a modern twist.  
-* **Antithetic / stratified** sampling.  
+* **Control variates** → reuse analytic prices (e.g., Black–Scholes) or low-variance replicating portfolios.  
+* **Deep-learning control variate** → train a neural net to learn and subtract MC noise (as in Ferguson & Green).  
+* **Antithetic / stratified sampling** → reduce variance by pairing or stratifying draws.  
 * **GPU kernels** for path generation and payoff loops.  
 * **Higher-order schemes** (Milstein, Ninomiya–Victoir) to reduce time-stepping bias.  
-* **Smarter input sampling** – Latin-hypercube, adaptive importance sampling, stochastic-vol dynamics.  
-* **Hybrid CV–NN** – train a neural net on the residual after subtracting an analytic control variate.
+* **Latin-hypercube sampling** → stratify each marginal into equal-probability bins to improve coverage and lower variance.  
+* **Adaptive importance sampling** → focus draws on payoff-sensitive regions.  
+* **Stochastic-vol input models** → sample from SV dynamics rather than fixed $\mathcal U(0,1)$ for $\sigma$.  
+* **Hybrid CV–NN** → train a neural net on the residual after subtracting an analytic control variate.  
 
 ---
 
