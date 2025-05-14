@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=worstof_100k_timing
-#SBATCH --output=worstof_100k_%j.out
-#SBATCH --time=85:00:00
+#SBATCH --job-name=worstof_10M_timing
+#SBATCH --output=worstof_10M_%j.out
+#SBATCH --time=2:00:00
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
@@ -20,9 +20,9 @@ export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export TORCH_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 cd $SCRATCH
-python -u ~/make_worst_of_dataset.py \
-       --rows 5000000 \
-       --paths 10000 \
-       --steps 64 \
+python -u ~/make_worst_of.py \
+       --rows 20 \
+       --paths 10000000 \
+       --steps 64 \ 
        --seed_offset 0 \
-       --out data.parquet
+       --out results_10M.parquet
