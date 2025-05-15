@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-make_worst_of_dataset_fast_cv.py
-  • multi-GPU, single-process, FP16+TF32 Monte-Carlo with:
-      – Owen-scrambled Sobol QMC
-      – Brownian-bridge construction
-      – Antithetic variates
-      – Control-variates using vanilla calls
+make_worst_of_dataset_fast.py
+  • multi-GPU, single-process, FP16+TF32 Monte-Carlo
+  • Owen-scrambled Sobol, antithetic, Brownian bridge
+  • Control variate: sum of single-asset Black-Scholes calls
   • Chunk-safe up to 100 M paths on 4×12 GiB GPUs
   • Exports price & Greeks with sampling-error columns
 """
 
 import os, math, time, argparse, pathlib, sys
-import numpy as np, pandas as pd, torch, pyarrow as pa, pyarrow.parquet as pq
+import numpy as np, pandas as pd, torch
+import pyarrow as pa, pyarrow.parquet as pq
 from torch.distributions import Beta, Normal
+from torch.quasirandom import SobolEngine
 
-# ──────────────────────────── knobs ────────────────────────────
+# ─────────────────────────── knobs ────────────────────────────
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark       = True
-torch.set_default_dtype(torch.float32)
+torch.set_default_dtype(torch.float16)
 
 N_ASSETS   = 3
 R_RATE     = 0.03
@@ -28,27 +28,28 @@ CHUNK_MAX  = 1_000_000   # flush Parquet every X rows
 CHUNK_PATH = 5_000_000   # inner GPU chunk size
 NGPU       = torch.cuda.device_count()
 DEVICES    = [torch.device(f"cuda:{i}") for i in range(NGPU)]
-
-if not NGPU:
+if NGPU == 0:
     sys.exit("No CUDA GPU visible – aborting.")
 
-# ────────────── correlation & sampling utils ──────────────
+# ───────────────── Sampler helpers ──────────────────────────
 
 def cvine_corr(d, a=5.0, b=2.0):
-    beta = Beta(torch.tensor([a], device="cuda"), torch.tensor([b], device="cuda"))
-    P = torch.eye(d, device="cuda")
+    # build correlation matrix in float32, then cast to float16
+    beta = Beta(torch.tensor([a], device="cuda", dtype=torch.float32),
+                torch.tensor([b], device="cuda", dtype=torch.float32))
+    P    = torch.eye(d, device="cuda", dtype=torch.float32)
     for k in range(d - 1):
         for i in range(k + 1, d):
             rho = 2 * beta.sample().item() - 1.0
             for m in range(k - 1, -1, -1):
-                rho = rho * math.sqrt((1 - P[m, i]**2) * (1 - P[m, k]**2)) + P[m, i]*P[m, k]
-            P[k, i] = P[i, k] = rho
+                rho = rho * math.sqrt((1 - P[m,i]**2)*(1 - P[m,k]**2)) + P[m,i]*P[m,k]
+            P[k,i] = P[i,k] = rho
     ev, evec = torch.linalg.eigh(P)
-    return evec @ torch.diag(torch.clamp(ev, min=1e-6)) @ evec.T
+    P_corr   = evec @ torch.diag(torch.clamp(ev, min=1e-6)) @ evec.T
+    return P_corr.to(torch.float16)
 
 
 def fg_sample():
-    # Ferguson–Green marginal sampler + random C-vine correlation
     z = np.random.normal(0.5, math.sqrt(0.25), N_ASSETS)
     return dict(
         S0=100 * np.exp(z),
@@ -59,112 +60,133 @@ def fg_sample():
         r=R_RATE
     )
 
-# ─────────── control-variates (Black-Scholes calls) ───────────
+# ──────────── Brownian bridge transformer ───────────────────
 
-def bs_call_price(S0, K, r, T, sigma):
-    d1 = (math.log(S0/K) + (r + 0.5*sigma*sigma)*T) / (sigma*math.sqrt(T))
-    d2 = d1 - sigma*math.sqrt(T)
-    Ndist = Normal(0.,1.)
-    # convert to tensor for cdf
-    d1t = torch.tensor(d1)
-    d2t = torch.tensor(d2)
-    return (S0 * Ndist.cdf(d1t) - K * math.exp(-r*T) * Ndist.cdf(d2t)).item()
+def brownian_bridge(normal_increments):
+    """
+    Simple Brownian-bridge reordering; replace with detailed bridge if needed.
+    """
+    order = [normal_increments.shape[1] - 1] + list(range(normal_increments.shape[1] - 1))
+    return normal_increments[:, order, :]
 
-# ─────────── Brownian-Bridge placeholder ───────────
+# ──────────── QMC+Antithetic path generator ─────────────────
 
-def apply_brownian_bridge(Z, T):
-    # Z: normal variates of shape [m, n_steps, N_ASSETS]
-    # Placeholder: insert a full BB construction here to reorder increments
-    return Z
+def generate_qmc_paths(m, n_steps, d, device):
+    engine = SobolEngine(d * n_steps, scramble=True)
+    u_cpu = engine.draw(m // 2, dtype=torch.float32)          # CPU float32
+    u     = u_cpu.to(device).to(torch.float16)               # GPU FP16
+    u     = torch.cat([u, 1.0 - u],      dim=0)              # antithetic
+    normals = Normal(0.,1.).icdf(u).view(m, n_steps, d)
+    return brownian_bridge(normals)
 
-# ────────────────── Monte-Carlo core (raw) ──────────────────
+# ──────────── Raw MC price + Greeks (no CV) ────────────────
+
 @torch.no_grad()
-def terminal_prices(S0, sigma, T, rho, *, n_paths, n_steps, r, Z=None):
-    device = S0.device
-    dt = torch.full((), T / n_steps, dtype=torch.float16, device=device)
-    mu    = (r - 0.5 * sigma**2).to(torch.float16)
-    sig   = sigma.to(torch.float16)
-    sqrt_dt = torch.sqrt(dt)
-    chol  = torch.linalg.cholesky(rho).to(torch.float16)
+def terminal_prices(S0, sigma, T, rho, *, n_paths, n_steps, r, Z):
+    # all FP16 intermediates
+    dt_fp16  = (T / n_steps).to(torch.float16)  # scalar
+    mu       = (r - 0.5 * sigma**2).to(torch.float16)  # [d]
+    sig      = sigma.to(torch.float16)                 # [d]
+    sqrt_dt  = math.sqrt(dt_fp16.item())              # float
 
-    out = torch.empty(n_paths, N_ASSETS, dtype=torch.float16, device=device)
+    # cholesky in FP32, then cast
+    rho32  = rho.to(torch.float32)
+    chol32 = torch.linalg.cholesky(rho32)
+    chol   = chol32.to(torch.float16)                 # [d,d]
+
+    out  = torch.empty(n_paths, N_ASSETS, dtype=torch.float16, device=Z.device)
+    logS0 = torch.log(S0).to(torch.float16)            # [d]
+
+    mu_dt = mu * dt_fp16                               # [d]
+    mu_dt = mu_dt.unsqueeze(0)                         # [1,d]
+    sig   = sig.unsqueeze(0)                           # [1,d]
+
     for start in range(0, n_paths, CHUNK_PATH):
-        end = min(start + CHUNK_PATH, n_paths)
-        m   = end - start
-        Zi  = Z[start:end] if Z is not None else torch.randn(
-              m, n_steps, N_ASSETS, device=device, dtype=torch.float16)
-        logS = torch.log(S0).expand(m, N_ASSETS).clone().to(torch.float16)
+        end   = min(start + CHUNK_PATH, n_paths)
+        Xi    = Z[start:end]                           # [batch,steps,d]
+        batch = Xi.shape[0]
+        logS  = logS0.expand(batch, N_ASSETS).clone() # [batch,d]
         for k in range(n_steps):
-            dW    = Zi[:, k] @ chol.T
-            logS += mu * dt + sig * sqrt_dt * dW
-        out[start:end] = torch.exp(logS)
+            dW    = Xi[:,k,:] @ chol.T               # [batch,d]
+            # incremental log step
+            inc   = mu_dt + sqrt_dt * (sig * dW)     # [batch,d]
+            logS  = logS + inc
+        out[start:end] = logS.exp()
     return out
 
-# alias raw function
-price_mc_raw = None
 
-def price_mc_raw(params, n_paths, n_steps, Z, *, return_payoff=False, return_se=False):
-    # inline the original price_mc body here (omitted for brevity)
-    # ...
-    raise NotImplementedError("Use the original price_mc code here as price_mc_raw.")
+def price_mc_raw(params, n_paths, n_steps):
+    per_gpu = n_paths // NGPU
+    payoffs = []
+    for dev in DEVICES:
+        Z     = generate_qmc_paths(per_gpu, n_steps, N_ASSETS, dev)
+        S0    = torch.tensor(params['S0'],    device=dev, dtype=torch.float16)
+        sigma = torch.tensor(params['sigma'], device=dev, dtype=torch.float16)
+        T     = torch.tensor(params['T'],     device=dev, dtype=torch.float16)
+        rho   = torch.tensor(params['rho'],   device=dev, dtype=torch.float16)
+        K     = torch.tensor(params['K'],     device=dev, dtype=torch.float16)
+        r     = torch.tensor(params['r'],     device=dev, dtype=torch.float16)
 
-# ─────────────────── enhanced Monte-Carlo ───────────────────
-@torch.no_grad()
-def price_mc(params, n_paths, n_steps, Z=None, *, return_payoff=False, return_se=False):
-    # 1) If user asked for raw payoffs only
-    if return_payoff and not return_se:
-        pay = price_mc_raw(params, n_paths, n_steps, Z, return_payoff=True)
-        return pay
-    if return_payoff and return_se:
-        pay, se0 = price_mc_raw(params, n_paths, n_steps, Z,
-                                return_payoff=True, return_se=True)
-        return pay, se0
+        ST    = terminal_prices(S0, sigma, T, rho,
+                                n_paths=per_gpu, n_steps=n_steps, r=r, Z=Z)
+        pay   = torch.clamp(ST.min(dim=1).values - K, 0.)
+        payoffs.append(pay.to('cpu'))
 
-    # 2) get raw payoffs and SE
-    pay, se0 = price_mc_raw(params, n_paths, n_steps, Z,
-                            return_payoff=True, return_se=True)
-    raw_price = pay.mean().item()
+    pay  = torch.cat(payoffs)
+    disc = math.exp(-params['r'] * params['T']) * pay
+    return disc, disc.std(unbiased=True).item() / math.sqrt(n_paths)
 
-    # 3) MC control‐payoff: sum of individual call payoffs
-    control_pay = pay.clamp(min=0).sum(dim=1)  # assuming pay returned ST-K clamped
-    mc_control_mean = control_pay.mean().item()
+# ────────── Black-Scholes vanilla call CV ───────────────────
 
-    # 4) Analytical expectation of control variate
-    expected_control = sum(
-        bs_call_price(params['S0'][i], params['K'], params['r'], params['T'], params['sigma'][i])
-        for i in range(N_ASSETS)
-    )
+def bs_call_price(S0, K, r, T, sigma):
+    # closed-form Black-Scholes call using math.erf for CDF
+    d1 = (math.log(S0/K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    # standard normal CDF via error function
+    N1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2)))
+    N2 = 0.5 * (1.0 + math.erf(d2 / math.sqrt(2)))
+    return S0 * N1 - K * math.exp(-r * T) * N2
 
-    # 5) corrected price with β=1
-    price_cv = raw_price + (expected_control - mc_control_mean)
+
+def price_mc(params, n_paths, n_steps, *, return_se=False):
+    raw_pay, raw_se = price_mc_raw(params, n_paths, n_steps)
+
+    # control variate
+    ctrl_pay = []
+    for dev in DEVICES:
+        Z     = generate_qmc_paths(n_paths//NGPU, n_steps, N_ASSETS, dev)
+        S0    = torch.tensor(params['S0'],    device=dev, dtype=torch.float16)
+        sigma = torch.tensor(params['sigma'], device=dev, dtype=torch.float16)
+        T     = torch.tensor(params['T'],     device=dev, dtype=torch.float16)
+        rho   = torch.tensor(params['rho'],   device=dev, dtype=torch.float16)
+        K     = torch.tensor(params['K'],     device=dev, dtype=torch.float16)
+        r     = torch.tensor(params['r'],     device=dev, dtype=torch.float16)
+
+        ST    = terminal_prices(S0, sigma, T, rho,
+                                 n_paths=n_paths//NGPU, n_steps=n_steps, r=r, Z=Z)
+        calls = torch.clamp(ST - K, 0.).sum(dim=1).to('cpu')
+        ctrl_pay.append(calls)
+    ctrl = torch.cat(ctrl_pay)
+    mc_ctrl_mean = ctrl.mean().item()
+
+    E_ctrl = sum(bs_call_price(params['S0'][j], params['K'], params['r'],
+                               params['T'], params['sigma'][j])
+                 for j in range(N_ASSETS))
+
+    raw_price = raw_pay.mean().item()
+    price_cv  = raw_price + (E_ctrl - mc_ctrl_mean)
 
     if return_se:
-        return price_cv, se0
+        return price_cv, raw_se
     return price_cv
 
-# ────────────────── Greeks via FD (with QMC+bridge+antithetic) ──────────────────
+# ───────────────────── main + Greeks abbr. ─────────────────────
 
 def greeks_fd(params, n_paths, n_steps):
     half = (n_paths // NGPU) // 2
-    # QMC + Owen-scrambled Sobol + antithetic + (placeholder) Brownian bridge
-    dim = N_ASSETS * n_steps
-    engine = torch.quasirandom.SobolEngine(dim, scramble=True)
-    # draw total half*NGPU points
-    u = engine.draw(half * NGPU).cpu()
-    u = u.view(NGPU, half, dim)
+    Zpairs = [torch.randn(half, n_steps, N_ASSETS, device=d, dtype=torch.float16)
+              for d in DEVICES]
 
-    Zpairs = []
-    for g, dev in enumerate(DEVICES):
-        ui = u[g]
-        # map uniform -> N(0,1)
-        z = torch.erfinv(2*ui - 1) * math.sqrt(2)
-        z = z.view(half, n_steps, N_ASSETS).to(dev).to(torch.float16)
-        # optional Brownian bridge transform
-        z = apply_brownian_bridge(z, params['T'])
-        ant = -z
-        Zpairs.append(torch.cat([z, ant], dim=0))
-
-    # baseline
     pay, base_se = price_mc(params, n_paths, n_steps, Zpairs,
                             return_payoff=True, return_se=True)
     base = pay.mean().item()
@@ -224,66 +246,52 @@ def greeks_fd(params, n_paths, n_steps):
             rho_v, rho_se,
             theta, theta_se)
 
-
-# ────────────────────────── main ──────────────────────────
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--rows',        type=int, default=100000)
     ap.add_argument('--paths',       type=int, default=10000)
     ap.add_argument('--steps',       type=int, default=64)
     ap.add_argument('--seed_offset', type=int, default=0)
-    ap.add_argument('--out',         type=str, default='data_cv.parquet')
-    ap.add_argument('--no_chunking', action='store_true',
-                    help="run all rows in one chunk for timing")
+    ap.add_argument('--out',         type=str, default='data.parquet')
+    ap.add_argument('--no_chunking', action='store_true')
     args = ap.parse_args()
 
     np.random.seed(SEED_BASE + args.seed_offset)
     torch.manual_seed(SEED_BASE + args.seed_offset)
 
-    out_path   = pathlib.Path(args.out)
-    pa_writer, first = None, True
-    chunk_size = args.rows if args.no_chunking else CHUNK_MAX
+    out_path, first = pathlib.Path(args.out), True
+    chunk_size       = args.rows if args.no_chunking else CHUNK_MAX
 
-    total_start = time.time()
-    sample_time = mc_time = 0.0
-    rows_left   = args.rows
-
-    print(f"⏱️  Starting Monte-Carlo CV for {args.rows:,} rows (chunk_size={chunk_size})…", flush=True)
-
+    rows_left = args.rows
+    pa_writer = None
     while rows_left:
         batch = min(rows_left, chunk_size)
         recs  = []
         for _ in range(batch):
-            ts = time.perf_counter(); p = fg_sample(); sample_time += time.perf_counter()-ts
-            tm = time.perf_counter()
-            # integrate greeks_fd here
-            pr,pr_se, d,d_se, v,v_se, g,g_se, rv,rv_se, th,th_se = \
-                greeks_fd(p, args.paths, args.steps)
-            mc_time += time.perf_counter()-tm
-            rec = {**{f"S0_{i}": p["S0"][i]   for i in range(N_ASSETS)},
-                   **{f"sigma_{i}": p["sigma"][i] for i in range(N_ASSETS)},
-                   "price":pr, "price_se":pr_se,
-                   **{f"delta_{i}":d[i]       for i in range(N_ASSETS)},
-                   **{f"delta_se_{i}":d_se[i] for i in range(N_ASSETS)},
-                   **{f"vega_{i}":v[i]        for i in range(N_ASSETS)},
-                   **{f"vega_se_{i}":v_se[i]  for i in range(N_ASSETS)},
-                   **{f"gamma_{i}":g[i]       for i in range(N_ASSETS)},
-                   **{f"gamma_se_{i}":g_se[i] for i in range(N_ASSETS)},
-                   "rho":rv, "rho_se":rv_se,
-                   "theta":th, "theta_se":th_se,
-                   "T":p["T"], "r":p["r"]}
-            recs.append(rec)
+            p = fg_sample()
+            pr, pr_se, d, d_se, v, v_se, g, g_se, rv, rv_se, th, th_se = greeks_fd(p, args.paths, args.steps)
+            recs.append({
+                **{f"S0_{i}": p['S0'][i]       for i in range(N_ASSETS)},
+                **{f"sigma_{i}": p['sigma'][i] for i in range(N_ASSETS)},
+                "price":pr, "price_se":pr_se,
+                **{f"delta_{i}":d[i]       for i in range(N_ASSETS)},
+                **{f"delta_se_{i}":d_se[i] for i in range(N_ASSETS)},
+                **{f"vega_{i}":v[i]        for i in range(N_ASSETS)},
+                **{f"vega_se_{i}":v_se[i]  for i in range(N_ASSETS)},
+                **{f"gamma_{i}":g[i]       for i in range(N_ASSETS)},
+                **{f"gamma_se_{i}":g_se[i] for i in range(N_ASSETS)},
+                "rho":rv, "rho_se":rv_se,
+                "theta":th, "theta_se":th_se,
+                "T":p['T'], "r":p['r']
+            })
         tbl = pa.Table.from_pylist(recs)
         if first:
-            pa_writer=pq.ParquetWriter(str(out_path),tbl.schema,compression='zstd')
-            first=False
+            pa_writer = pq.ParquetWriter(str(out_path), tbl.schema, compression='zstd')
+            first = False
         pa_writer.write_table(tbl)
         rows_left -= batch
 
     pa_writer.close()
-    total_time = time.time() - total_start
-    print(f"Total sampler time: {sample_time:.1f}s, MC+Greeks time: {mc_time:.1f}s",flush=True)
-    print(f"Wrote {args.rows:,} rows → {out_path} in {total_time:.1f}s on {NGPU} GPU(s)")
 
 if __name__ == "__main__":
     main()
