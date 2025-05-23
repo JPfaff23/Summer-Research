@@ -58,6 +58,8 @@ def fg_sample():
     )
 
 # ------ simulate terminal prices ------
+# Replace with T remove dt, don't need the time steps 
+
 @torch.no_grad()
 def terminal_prices(S0, sigma, T, rho, *, n_paths, n_steps, r, Z=None):
     dt   = T / n_steps
@@ -205,11 +207,11 @@ def greeks_fd(params, n_paths, n_steps):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--rows',        type=int, default=10000)
-    ap.add_argument('--paths',       type=int, default=10000)
+    ap.add_argument('--rows',        type=int, default=10)
+    ap.add_argument('--paths',       type=int, default=10_000_000)
     ap.add_argument('--steps',       type=int, default=64)
     ap.add_argument('--seed_offset', type=int, default=0)
-    ap.add_argument('--out',         type=str, default='data.parquet')
+    ap.add_argument('--out',         type=str, default='Test_10.parquet')
     ap.add_argument('--no_chunking', action='store_true',
                     help="run all rows in one chunk for timing")
     args = ap.parse_args()
