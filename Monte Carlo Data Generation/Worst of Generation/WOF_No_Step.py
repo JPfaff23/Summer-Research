@@ -105,7 +105,7 @@ def price_mc(params, n_paths, return_se=False):
             S0    = torch.tensor(params['S0'],    device=dev)
             sigma = torch.tensor(params['sigma'], device=dev)
             T     = torch.tensor(params['T'],     device=dev)
-            rho   = params['rho']
+            rho   = params['rho'].to(dev)
             K, r  = params['K'], params['r']
             ST = terminal_prices(S0, sigma, T, rho,
                                  n_paths=sz, r=r)
@@ -182,7 +182,7 @@ def greeks_fd(params, n_paths):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--rows',       type=int, default=10)
-    ap.add_argument('--paths',      type=int, default=100_000_000)
+    ap.add_argument('--paths',      type=int, default=10_000_000)
     ap.add_argument('--seed_offset',type=int, default=0)
     ap.add_argument('--out',        type=str, default='Test100.parquet')
     ap.add_argument('--no_chunking',action='store_true')
