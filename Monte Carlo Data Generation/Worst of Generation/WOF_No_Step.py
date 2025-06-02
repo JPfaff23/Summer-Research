@@ -22,7 +22,7 @@ torch.set_default_dtype(torch.float32)
 
 N_ASSETS   = 3
 R_RATE     = 0.03
-EPS_REL    = 1e-4
+EPS_REL    = 1e-1
 SEED_BASE  = 42
 CHUNK_MAX  = 1_000_000                 # rows before flushing Parquet
 NGPU       = torch.cuda.device_count()
@@ -136,7 +136,9 @@ def greeks_fd(params, n_paths):
 
     # 1) Delta, Gamma & Vega via finite differences
     for i in range(N_ASSETS):
-        hS = max(EPS_REL * params['S0'][i],    1e-6)
+        #Underlying Shift 
+        hS = max(EPS_REL * params['S0'][i], 1e-6)
+        #Volatitly Shift
         hV = max(EPS_REL * params['sigma'][i], 1e-6)
 
         # Delta & Gamma
@@ -181,10 +183,10 @@ def greeks_fd(params, n_paths):
 # ------------------------- driver -----------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--rows',       type=int, default=10)
-    ap.add_argument('--paths',      type=int, default=10_000_000)
+    ap.add_argument('--rows',       type=int, default=1)
+    ap.add_argument('--paths',      type=int, default=100_000_000)
     ap.add_argument('--seed_offset',type=int, default=0)
-    ap.add_argument('--out',        type=str, default='Test100.parquet')
+    ap.add_argument('--out',        type=str, default='1e-1.parquet')
     ap.add_argument('--no_chunking',action='store_true')
     args = ap.parse_args()
 
@@ -198,6 +200,7 @@ def main():
     rows_left   = args.rows
 
     print(f"??  Starting Monte-Carlo for {args.rows:,} rows…", flush=True)
+    
     while rows_left:
         batch = min(rows_left, CHUNK_MAX)
         recs  = []
