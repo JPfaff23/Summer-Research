@@ -1,2 +1,7 @@
 /SensitiveData
 /Monte Carlo Data Generation/Worst of Generation/Data
+Monte Carlo Data Generation/Worst of Generation/Test100M_clean.parquet
+Monte Carlo Data Generation/Worst of Generation/Train_clean.parquet
+.gitignore
+Monte Carlo Data Generation/Worst of Generation/Test100M.parquet
+Monte Carlo Data Generation/Worst of Generation/Train.parquet
