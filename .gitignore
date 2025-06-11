@@ -5,3 +5,8 @@ Monte Carlo Data Generation/Worst of Generation/Train_clean.parquet
 .gitignore
 Monte Carlo Data Generation/Worst of Generation/Test100M.parquet
 Monte Carlo Data Generation/Worst of Generation/Train.parquet
+Monte Carlo Data Generation/Worst of Generation/1e-5.parquet
+Monte Carlo Data Generation/Worst of Generation/1e-4.parquet
+Monte Carlo Data Generation/Worst of Generation/Test_Clean.parquet
+Monte Carlo Data Generation/Worst of Generation/Test_New.parquet
+Monte Carlo Data Generation/Worst of Generation/Train_New.parquet
