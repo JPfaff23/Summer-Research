@@ -178,10 +178,10 @@ def greeks_fd(params, n_paths):
 # ----------------- main driver -----------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--rows',        type=int, default=500)
+    ap.add_argument('--rows',        type=int, default=5_000)
     ap.add_argument('--paths',       type=int, default=100_000_000)
     ap.add_argument('--seed_offset', type=int, default=0)
-    ap.add_argument('--out',         type=str, default='Train_New.parquet')
+    ap.add_argument('--out',         type=str, default='Train_New_5M.parquet')
     ap.add_argument('--no_chunking', action='store_true')
     ap.add_argument('--no-greeks',   dest='compute_greeks', action='store_false',
                     default=False, help='skip finite-difference Greeks')
