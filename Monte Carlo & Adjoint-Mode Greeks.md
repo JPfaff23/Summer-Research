@@ -1,3 +1,5 @@
+# Monte Carlo & Adjoint-Mode Greeks  
+**Jackson Pfaff – May 2025**
 
 ---
 
@@ -42,7 +44,10 @@ We need the pathwise sensitivity $\Delta_i = \partial P/\partial S_{0,i}$ via re
    $\bar S^* = \bar A, \qquad \bar K = -\,\bar A$
 
 5. **Back through minimum.**
-   $\bar S_{i}(T)=\mathbf{1}_{\{i=i^{*}\}}\;\bar S^{*},\quad i^{*}=\arg\min_{i} S_{i}(T)$
+   \(\bar{S}_{i}(T)=\mathbb{1}_{\{i=i^{\ast}\}}\,\bar{S}^{\ast},\;
+ i^{\ast}= \underset{i}{\operatorname{arg\,min}}\;S_{i}(T)\)
+
+
 
 6. **Back through exponential.**
    $\bar G_i = S_i(T)\,\bar S_i(T)$
@@ -68,4 +73,7 @@ We now find $\mathrm{Vega}_i = \partial P/\partial \sigma_i$ by continuing the r
 > $\mathrm{Vega}_i = e^{-rT}\,\mathbf{1}_{\{A>0\}}\,\mathbf{1}_{\{i = i^{*}\}}\;S_i(T)\!\left(-\,\sigma_i T + \sqrt{T}\,(LZ)_i\right)$
 
 ---
+## References
 
+- Capriotti, L. (2010) *Fast Greeks by Algorithmic Differentiation*
+- Ferguson, S. & Green, J. (2018) “Deeply Learning Derivatives,” 
