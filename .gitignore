@@ -17,3 +17,5 @@ Monte Carlo Data Generation/Worst of Generation/Train_5m.parquet
 Monte Carlo Data Generation/Worst of Generation/Train_Clean_5m.parquet
 Monte Carlo Data Generation/Worst of Generation/Train_FGAD.parquet
 Monte Carlo Data Generation/Worst of Generation/Train_Fast2nd.parquet
+Test_Clean_5k.parquet
+Train_Clean_5m.parquet
