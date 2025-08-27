@@ -1,0 +1,4 @@
+Method,Seconds_per_1k_rows
+MC (overall wall),1783.3842783199998
+ANP (wall),0.004012379727936297
+DHN (wall),0.0040166099867286

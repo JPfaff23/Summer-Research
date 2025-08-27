@@ -1,0 +1,8 @@
+Method,Phase,Seconds
+ANP,Train (reported),8040.0
+DHN,Train (reported),14580.0
+ANP,Inference Wall (raw),0.193493
+DHN,Inference Wall (raw),0.193697
+MC,FD Greeks-only (raw),50801.533099
+MC,AAD Greeks-only (raw),16086.471748
+MC,Overall wall (raw),89169.213916

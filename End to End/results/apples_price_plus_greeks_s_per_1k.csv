@@ -1,0 +1,5 @@
+Method,Seconds_per_1k_rows
+MC AAD (Price+Greeks),321.72943496
+MC FD (Greeks only total),1016.0306619799999
+ANP fwd+back (Price+Greeks),0.0037376410086264102
+DHN fwd+back (Price+Greeks),0.003753151957531519

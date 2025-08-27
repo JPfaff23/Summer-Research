@@ -1,0 +1,5 @@
+Method,Seconds_per_1k_rows
+MC FD (Greeks-only),1016.0306619799999
+MC AAD (Greeks-only),321.72943496
+ANP autograd (Greeks),0.0020975033178500333
+DHN autograd (Greeks),0.0020378027538155274

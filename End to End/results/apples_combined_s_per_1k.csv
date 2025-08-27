@@ -1,0 +1,9 @@
+Context,Method,Seconds_per_1k_rows
+Greeks-only,MC FD (Greeks only),1016.0306619799999
+Greeks-only,MC AAD (Price+Greeks total),321.72943496
+Greeks-only,ANP autograd (Greeks),0.0020975033178500333
+Greeks-only,DHN autograd (Greeks),0.0020378027538155274
+Price+Greeks,MC AAD (Price+Greeks),321.72943496
+Price+Greeks,MC FD (Greeks only total),1016.0306619799999
+Price+Greeks,ANP fwd+back (Price+Greeks),0.0037376410086264102
+Price+Greeks,DHN fwd+back (Price+Greeks),0.003753151957531519
